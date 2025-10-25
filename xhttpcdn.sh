@@ -1,334 +1,334 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ========== Красота ==========
+# ---------- Красота ----------
 if [[ -t 1 ]]; then
   RED=$(printf '\033[31m'); GRN=$(printf '\033[32m'); YLW=$(printf '\033[33m')
   BLU=$(printf '\033[34m'); CYA=$(printf '\033[36m'); BLD=$(printf '\033[1m')
-  RST=$(printf '\033[0m')
-else
-  RED=""; GRN=""; YLW=""; BLU=""; CYA=""; BLD=""; RST=""
+  DIM=$(printf '\033[2m'); RST=$(printf '\033[0m')
+else RED=""; GRN=""; YLW=""; BLU=""; CYA=""; BLD=""; DIM=""; RST=""; fi
+step(){ echo; echo "${BLD}${CYA}[STEP]${RST} $*"; }
+ok(){   echo "${GRN}✔${RST} $*"; }
+warn(){ echo "${YLW}!${RST} $*"; }
+err(){  echo "${RED}✘${RST} $*" >&2; }
+
+banner(){ echo "${BLD}${BLU}=== Remnawave VLESS XHTTP + Nginx (CDN ready) — установщик ===${RST}"; }
+
+explain_domains(){
+  local mode="$1"
+  echo
+  echo "${BLD}Как заполнять домены:${RST}"
+  if [[ "$mode" == "1" ]]; then
+    cat <<'HLP'
+• Режим: через внешний CDN (Яндекс CDN/Cloudfort/etc.)
+  - CDN-домен (публичный): твой поддомен, куда идут клиенты.
+      Пример: cdn2.yourbeautycostmore.hair
+      DNS:    CNAME -> Хост, выданный CDN
+              (пример: 4f07146f16015b10.a.yccdn.cloud.yandex.net или htww9x9nsz.cdncf.ru)
+  - Origin/TLS-домен: поддомен с A-записью на IP VPS (на нём выпустим сертификат).
+      Пример: cdnhello.yourbeautycostmore.hair
+      В панели CDN: origin host = cdnhello.yourbeautycostmore.hair, protocol = HTTPS.
+HLP
+  else
+    cat <<'HLP'
+• Режим: без внешнего CDN (напрямую)
+  - CDN-домен (публичный): твой поддомен с A -> IP VPS.
+      Пример: cdnhello.yourbeautycostmore.hair
+  - Origin/TLS-домен: обычно тот же домен (или любой с A -> IP VPS), на него выпустим сертификат.
+HLP
+  fi
+  echo
+}
+
+# ---------- Очистка ----------
+cleanup_domain(){
+  local TARGET_DOMAIN="$1" ALSO_CERT="$2" PURGE_WEB="$3"
+  local SA="/etc/nginx/sites-available" SE="/etc/nginx/sites-enabled"
+
+  step "Удаляю nginx-конфиги с server_name ${TARGET_DOMAIN} ..."
+  mapfile -t HITS < <(grep -lsR --include="*.conf" -E "server_name[^;]*\b${TARGET_DOMAIN}\b" "$SA" 2>/dev/null || true)
+  if ((${#HITS[@]})); then
+    for f in "${HITS[@]}"; do
+      echo " - ${f}"
+      local base; base="$(basename "$f")"
+      rm -f "${SE}/${base}" 2>/dev/null || true
+      rm -f "${f}" || true
+    done
+    ok "Конфиги и ссылки удалены"
+  else
+    warn "Совпадений в ${SA} не найдено"
+  fi
+
+  step "Удаляю временные ACME-конфиги ..."
+  rm -f "${SA}"/_acme_*.conf "${SE}"/_acme_*.conf 2>/dev/null || true
+  ok "ACME-конфиги убраны"
+
+  if [[ "${ALSO_CERT^^}" == "Y" ]]; then
+    step "Удаляю сертификат Let's Encrypt для ${TARGET_DOMAIN} ..."
+    if [[ -d "/etc/letsencrypt/live/${TARGET_DOMAIN}" ]]; then
+      certbot delete --cert-name "${TARGET_DOMAIN}" -n || true
+      ok "Сертификат удалён"
+    else
+      warn "Каталог /etc/letsencrypt/live/${TARGET_DOMAIN} отсутствует"
+    fi
+  fi
+
+  if [[ "${PURGE_WEB^^}" == "Y" ]]; then
+    step "Удаляю веб-контент, созданный скриптом ..."
+    rm -rf /var/www/zeronode /var/www/letsencrypt 2>/dev/null || true
+    ok "Веб-корень и ACME-директория очищены"
+  fi
+
+  step "Проверяю nginx и перезагружаю ..."
+  if nginx -t; then
+    systemctl reload nginx || systemctl restart nginx
+    ok "nginx перезагружен"
+  else
+    err "nginx -t упал — проверь конфиги"
+  fi
+
+  ok "Очистка по домену ${TARGET_DOMAIN} завершена."
+}
+
+# ---------- Старт ----------
+banner
+echo "Выбери режим:
+  ${BLD}1${RST} — Чистая установка через внешний CDN (CNAME)
+  ${BLD}2${RST} — Добавить ещё один CDN на эту ноду
+  ${BLD}3${RST} — Очистка/удаление по домену"
+read -rp "Введи 1/2/3: " MODE
+[[ -z "${MODE:-}" ]] && MODE=1
+
+if [[ "${MODE}" == "3" ]]; then
+  read -rp "Домен, по которому чистим: " CLEAN_FQDN
+  [[ -z "${CLEAN_FQDN}" ]] && { err "Домен обязателен"; exit 1; }
+  read -rp "Удалить сертификат Let's Encrypt для ${CLEAN_FQDN}? [Y/n]: " DELCERT; DELCERT="${DELCERT:-Y}"
+  read -rp "Удалить веб-контент /var/www/zeronode ? [y/N]: " PURGEWEB; PURGEWEB="${PURGEWEB:-N}"
+  cleanup_domain "${CLEAN_FQDN}" "${DELCERT}" "${PURGEWEB}"
+  exit 0
 fi
-step() { echo; echo "${BLD}${CYA}[STEP]${RST} $*"; }
-ok()   { echo "${GRN}✔${RST} $*"; }
-warn() { echo "${YLW}!${RST} $*"; }
-err()  { echo "${RED}✘${RST} $*" >&2; }
 
-echo "${BLD}${BLU}=== Remnawave VLESS XHTTP через CDN — автонастройка Nginx + сайт ===${RST}"
+explain_domains "${MODE}"
 
-# ========== Ввод ==========
-read -rp "CDN-домен (публичный), напр. 22zbjwrrqb.a.trbcdn.net: " CDN_DOMAIN
-read -rp "Внутренний домен ноды (сертификаты уже/будут на нём), напр. zeronode.gonocta.space: " INTERNAL_DOMAIN
-read -rp "Путь XHTTP (по умолчанию /cdn/video/hls/): " XHTTP_PATH
+# ---------- Ввод ----------
+if [[ "${MODE}" == "1" ]]; then
+  echo "${DIM}Пример: CDN-домен=cdn2.yourbeautycostmore.hair (CNAME -> 4f07...yccdn...), Origin=cdnhello.yourbeautycostmore.hair (A -> IP VPS)${RST}"
+else
+  echo "${DIM}Пример: CDN-домен=cdnhello.yourbeautycostmore.hair (A -> IP VPS), Origin=тот же${RST}"
+fi
+
+read -rp "CDN-домен (публичный, куда идут клиенты): " CDN_DOMAIN
+read -rp "Origin/TLS-домен (на нём выпустим SSL; в панели CDN — origin host): " INTERNAL_DOMAIN
+read -rp "XHTTP путь (по умолчанию /cdn/video/hls/): " XHTTP_PATH
 XHTTP_PATH="${XHTTP_PATH:-/cdn/video/hls/}"
 
-echo
-read -rp "Если сертификатов нет — попытаться выпустить Let's Encrypt для ВНУТРЕННЕГО домена? [Y/n]: " WANT_ISSUE_INT
-WANT_ISSUE_INT="${WANT_ISSUE_INT:-Y}"
-
-read -rp "Если DNS CDN-домена указывает на этот сервер — попытаться выпустить и для CDN-домена? [y/N]: " WANT_ISSUE_CDN
-WANT_ISSUE_CDN="${WANT_ISSUE_CDN:-N}"
-
 LE_EMAIL_DEFAULT="admin@${INTERNAL_DOMAIN}"
-read -rp "E-mail для Let's Encrypt (уведомления) [по умолчанию: ${LE_EMAIL_DEFAULT}]: " LE_EMAIL
+read -rp "E-mail для Let's Encrypt [${LE_EMAIL_DEFAULT}]: " LE_EMAIL
 LE_EMAIL="${LE_EMAIL:-$LE_EMAIL_DEFAULT}"
 
-read -rp "Удалять конфликтующий nginx-конфиг с этим именем (если есть)? [Y/n]: " RM_CONFLICT
-RM_CONFLICT="${RM_CONFLICT:-Y}"
+read -rp "Если cert отсутствует — выпустить для ${INTERNAL_DOMAIN}? [Y/n]: " WANT_CERT_INTERNAL
+WANT_CERT_INTERNAL="${WANT_CERT_INTERNAL:-Y}"
 
-read -rp "Перезагрузить nginx после настройки? [Y/n]: " RELOAD_NGINX
-RELOAD_NGINX="${RELOAD_NGINX:-Y}"
+[[ -z "${CDN_DOMAIN}" || -z "${INTERNAL_DOMAIN}" ]] && { err "CDN-домен и Origin/TLS-домен обязательны"; exit 1; }
 
-if [[ -z "${CDN_DOMAIN}" || -z "${INTERNAL_DOMAIN}" ]]; then
-  err "CDN_DOMAIN и INTERNAL_DOMAIN обязательны."
-  exit 1
-fi
+echo
+echo "${BLD}ИТОГО:${RST}
+  CDN-домен (публичный):  ${CYA}${CDN_DOMAIN}${RST}
+  Origin/TLS-домен:       ${CYA}${INTERNAL_DOMAIN}${RST}
+  XHTTP путь:             ${CYA}${XHTTP_PATH}${RST}
+  Cert для Origin:        ${CYA}${WANT_CERT_INTERNAL}${RST}"
+echo
 
-SITE_NAME="${INTERNAL_DOMAIN}"
-SITE_FILE="/etc/nginx/sites-available/${SITE_NAME}.conf"
-SITE_LINK="/etc/nginx/sites-enabled/${SITE_NAME}.conf"
-
-CERT_DIR_INT="/etc/letsencrypt/live/${INTERNAL_DOMAIN}"
-FULLCHAIN_INT="${CERT_DIR_INT}/fullchain.pem"
-PRIVKEY_INT="${CERT_DIR_INT}/privkey.pem"
-
-CERT_DIR_CDN="/etc/letsencrypt/live/${CDN_DOMAIN}"
-FULLCHAIN_CDN="${CERT_DIR_CDN}/fullchain.pem"
-PRIVKEY_CDN="${CERT_DIR_CDN}/privkey.pem"
-
-WEB_ROOT="/var/www/zeronode"
-HTML_ROOT="${WEB_ROOT}/html"
-HLS_ROOT="${WEB_ROOT}/cdn/video/hls"
-ACME_ROOT="/var/www/letsencrypt"
-
-# ========== 1. Пакеты ==========
-step "Устанавливаем/обновляем пакеты (nginx, certbot, curl, ca-certificates)..."
+# ---------- Пакеты ----------
+step "Ставлю пакеты (nginx, certbot, curl, ca-certificates) ..."
 export DEBIAN_FRONTEND=noninteractive
 apt update -y
 apt install -y nginx certbot curl ca-certificates
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow 80/tcp || true
-  ufw allow 443/tcp || true
-fi
+if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp || true; ufw allow 443/tcp || true; fi
 ok "Пакеты готовы"
 
-# ========== 2. Каталоги ==========
-step "Готовим каталоги сайта/HLS/ACME..."
-mkdir -p "${HTML_ROOT}" "${HLS_ROOT}" "${ACME_ROOT}"
-ok "Каталоги созданы"
+WEB_ROOT="/var/www/zeronode"
+HTML_ROOT="${WEB_ROOT}/html"
+ACME_ROOT="/var/www/letsencrypt"
+HLS_ROOT="${WEB_ROOT}${XHTTP_PATH%/}"
 
-# ========== 3. Временный HTTP для ACME ==========
-TEMP80="/etc/nginx/sites-available/_acme_${SITE_NAME}.conf"
-step "Готовим временный сервер :80 для HTTP-01 ACME..."
-cat > "${TEMP80}" <<EOF
+step "Готовлю директории сайта/ACME/HLS ..."
+mkdir -p "${HTML_ROOT}" "${ACME_ROOT}" "${HLS_ROOT}"
+ok "Директории есть"
+
+# ---------- index.html ----------
+step "Разворачиваю index.html (если отсутствует)"
+if [[ -f "${HTML_ROOT}/index.html" ]]; then
+  warn "index.html уже есть — не трогаю"
+else
+  cat > "${HTML_ROOT}/index.html" <<'HTML'
+<!doctype html><meta charset="utf-8"><title>Edge node</title>
+<body style="margin:0;background:#0f172a;color:#e5e7eb;font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif">
+<div style="max-width:860px;margin:10vh auto;padding:24px">
+  <h1 style="margin:0 0 8px">Edge node</h1>
+  <p>Статический сайт + XHTTP.</p>
+</div>
+</body>
+HTML
+  ok "index.html создан"
+fi
+
+# ---------- ACME :80 ----------
+TEMP80="/etc/nginx/sites-available/_acme_${INTERNAL_DOMAIN}.conf"
+if [[ "${WANT_CERT_INTERNAL^^}" != "N" ]]; then
+  step "Поднимаю временный HTTP для ACME ..."
+  cat > "${TEMP80}" <<EOF
 server {
   listen 80;
   listen [::]:80;
   server_name ${INTERNAL_DOMAIN} ${CDN_DOMAIN};
-  location /.well-known/acme-challenge/ {
-    root ${ACME_ROOT};
-    allow all;
-  }
+  location /.well-known/acme-challenge/ { root ${ACME_ROOT}; allow all; }
   location / { return 301 https://\$host\$request_uri; }
 }
 EOF
-ln -sf "${TEMP80}" "/etc/nginx/sites-enabled/_acme_${SITE_NAME}.conf"
-nginx -t && systemctl reload nginx
-ok "ACME-сервер на 80 активирован"
+  ln -sf "${TEMP80}" "/etc/nginx/sites-enabled/_acme_${INTERNAL_DOMAIN}.conf"
+  nginx -t && systemctl reload nginx
+  ok "ACME-сайт включён"
 
-# ========== 4. Выпуск сертификатов при необходимости ==========
-want_issue_domain() {
-  local domain="$1"
-  local fullchain="/etc/letsencrypt/live/${domain}/fullchain.pem"
-  local privkey="/etc/letsencrypt/live/${domain}/privkey.pem"
-  if [[ -s "$fullchain" && -s "$privkey" ]]; then
-    warn "Сертификаты для ${domain} уже найдены. Пропускаю выпуск."
-    return 0
-  fi
-  step "Выпускаем сертификат для ${domain} (HTTP-01, webroot=${ACME_ROOT})..."
-  if certbot certonly --agree-tos --no-eff-email --email "${LE_EMAIL}" \
-      --webroot -w "${ACME_ROOT}" -d "${domain}" --non-interactive; then
-    ok "Выпущено: ${domain}"
+  step "Выпускаю сертификат для ${INTERNAL_DOMAIN} ..."
+  if certbot certonly --agree-tos --no-eff-email --email "${LE_EMAIL}" --webroot -w "${ACME_ROOT}" -d "${INTERNAL_DOMAIN}" -n; then
+    ok "Сертификат выпущен"
   else
-    err "Не удалось выпустить сертификат для ${domain}. Проверь DNS A-запись (должна указывать на этот сервер) и доступ к :80."
-    return 1
+    warn "Выпустить не удалось — продолжаю, если cert уже есть."
   fi
-}
-
-# внутренний домен
-if [[ "${WANT_ISSUE_INT^^}" != "N" ]]; then
-  want_issue_domain "${INTERNAL_DOMAIN}" || true
 fi
 
-# CDN-домен (только если реально указывает на этот сервер)
-if [[ "${WANT_ISSUE_CDN^^}" == "Y" ]]; then
-  # осторожно: это сработает только если CDN-домен A/AAAA → этот сервер
-  want_issue_domain "${CDN_DOMAIN}" || true
+FULLCHAIN_INT="/etc/letsencrypt/live/${INTERNAL_DOMAIN}/fullchain.pem"
+PRIVKEY_INT="/etc/letsencrypt/live/${INTERNAL_DOMAIN}/privkey.pem"
+[[ ! -s "${FULLCHAIN_INT}" || ! -s "${PRIVKEY_INT}" ]] && { err "Нет валидного cert для ${INTERNAL_DOMAIN}"; exit 1; }
+
+# ---------- Определяем корректный сокет ----------
+step "Ищу доступные UNIX-сокеты Xray в /dev/shm ..."
+mapfile -t SOCKETS < <(ls -1 /dev/shm/*.socket 2>/dev/null || true)
+SOCK_PATH_DEFAULT="/dev/shm/xrxh.socket"
+# эвристика: если путь содержит 'cdn2' — предлагаем xrxh2.socket
+if [[ "${XHTTP_PATH}" == *"/cdn2/"* ]] && [[ -S "/dev/shm/xrxh2.socket" ]]; then
+  SOCK_PATH_DEFAULT="/dev/shm/xrxh2.socket"
 fi
 
-# Проверим наличие сертификатов для внутреннего домена (обязательно)
-if [[ ! -s "${FULLCHAIN_INT}" || ! -s "${PRIVKEY_INT}" ]]; then
-  err "Нет валидных сертификатов для внутреннего домена: ${INTERNAL_DOMAIN}"
-  echo "Ожидалось: ${FULLCHAIN_INT} и ${PRIVKEY_INT}"
-  echo "Выдай сертификат и перезапусти скрипт."
-  exit 1
+if ((${#SOCKETS[@]})); then
+  echo "Найдено сокетов:"
+  i=1; for s in "${SOCKETS[@]}"; do echo "  ${i}) ${s}"; ((i++)); done
+  read -rp "Выбери номер сокета (ENTER = ${SOCK_PATH_DEFAULT}): " CH
+  if [[ -n "${CH:-}" && "${CH}" =~ ^[0-9]+$ && "${CH}" -ge 1 && "${CH}" -le "${#SOCKETS[@]}" ]]; then
+    SOCK_PATH="${SOCKETS[$((CH-1))]}"
+  else
+    SOCK_PATH="${SOCK_PATH_DEFAULT}"
+  fi
+else
+  warn "Сокетов не найдено. По умолчанию укажу ${SOCK_PATH_DEFAULT}."
+  SOCK_PATH="${SOCK_PATH_DEFAULT}"
 fi
-ok "Сертификаты для ${INTERNAL_DOMAIN} готовы"
+warn "Использую сокет: ${SOCK_PATH}"
+[[ ! -S "${SOCK_PATH}" ]] && warn "Сейчас его нет — подними inbound в Remnawave/Xray на этот путь, иначе будет 502."
 
-# ========== 5. Страница index.html ==========
-step "Разворачиваем сайт-плеер (index.html)..."
-cat > "${HTML_ROOT}/index.html" <<'HTML'
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8">
-  <title>Вечер с Владимиром Соловьёвым — Лучшее</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Лучшее из программы «Вечер с Владимиром Соловьёвым». Новости, эфир, аналитика.">
-  <link rel="icon" href="https://upload.wikimedia.org/wikipedia/commons/2/21/Star_icon-72a7cf.svg">
-  <style>
-    * { box-sizing: border-box; }
-    body { margin:0; font-family:"Segoe UI","Roboto","Arial",sans-serif;
-      background:linear-gradient(180deg,#0a0a1a 0%,#1a1a2e 100%); color:#f2f2f2; }
-    header { background:#830000; padding:15px 20px; text-align:center; box-shadow:0 2px 5px rgba(0,0,0,.4); }
-    header h1 { margin:0; font-size:28px; font-weight:700; }
-    header p { margin:4px 0 0; color:#f5cccc; }
-    main { max-width:1200px; margin:20px auto; padding:0 15px; }
-    .btn-watch { display:inline-block; margin:10px 0 20px; padding:14px 28px; font-size:18px;
-      color:#fff; background:linear-gradient(90deg,#a40000,#d00000); border-radius:4px; text-decoration:none; }
-    .video-container { background:#000; border:3px solid #930000; border-radius:8px; box-shadow:0 0 20px rgba(255,0,0,.2); overflow:hidden; }
-    video { width:100%; height:auto; background:#000; }
-    .video-info { padding:12px 15px; background:#1a1a2e; border-top:1px solid #333; }
-    .video-title { font-weight:700; }
-    .overlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.5); }
-    .overlay.show { display:flex; }
-    .wrap { position:relative; }
-    footer { margin-top:40px; text-align:center; color:#888; padding:18px 10px; border-top:1px solid #333; background:#111; }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>ВЕЧЕР С ВЛАДИМИРОМ СОЛОВЬЁВЫМ</h1>
-    <p>Лучшее из программы. Эфир, дискуссии, события дня.</p>
-  </header>
-
-  <main>
-    <a href="#video" class="btn-watch">▶ Смотреть эфир</a>
-    <div class="video-container wrap" id="video">
-      <video id="player" controls playsinline></video>
-      <div id="overlay" class="overlay">
-        <a id="playBtn" class="btn-watch">▶ Воспроизвести со звуком</a>
-      </div>
-      <div class="video-info">
-        <div class="video-title">Выпуск (демо)</div>
-        <div class="video-date">Опубликовано: 30.05.2025</div>
-      </div>
-    </div>
-  </main>
-
-  <footer>© 2025 Российское телевидение. Все права защищены.</footer>
-
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script>
-    // Автоплей со звуком без клика невозможен по политике браузеров.
-    // Делаем "тихий старт" и включаем звук по первому тапу/клику.
-    const video = document.getElementById('player');
-    const overlay = document.getElementById('overlay');
-    const btn = document.getElementById('playBtn');
-    const src = '/cdn/video/hls/Vecher.s.Solovyovim.30.05/master.m3u8';
-
-    let inited = false;
-    function init() {
-      if (inited) return; inited = true;
-      if (Hls.isSupported()) { const h = new Hls(); h.loadSource(src); h.attachMedia(video); }
-      else if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = src; }
-    }
-    (async () => {
-      init(); video.muted = true;
-      try { await video.play(); overlay.classList.add('show'); }
-      catch { overlay.classList.add('show'); }
-    })();
-    btn.addEventListener('click', async () => {
-      init(); video.muted = false; try { await video.play(); } catch {}
-      overlay.classList.remove('show');
-    });
-  </script>
-</body>
-</html>
-HTML
-ok "index.html установлен: ${HTML_ROOT}/index.html"
-
-# ========== 6. Nginx сайт с XHTTP/HLS ==========
-step "Готовим постоянный nginx-вирт: ${SITE_FILE}"
-
-if [[ -f "${SITE_FILE}" && "${RM_CONFLICT^^}" != "N" ]]; then
-  mv -f "${SITE_FILE}" "${SITE_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
-  warn "Старый ${SITE_FILE} сохранён как .bak"
-fi
+# ---------- Основной nginx-вирт ----------
+SITE_FILE="/etc/nginx/sites-available/${INTERNAL_DOMAIN}.conf"
+SITE_LINK="/etc/nginx/sites-enabled/${INTERNAL_DOMAIN}.conf"
+step "Пишу nginx-конфиг: ${SITE_FILE}"
 
 cat > "${SITE_FILE}" <<NGINX
 server {
     listen 443 ssl http2;
     server_name ${INTERNAL_DOMAIN} ${CDN_DOMAIN};
 
-    # Используем серты внутреннего домена
     ssl_certificate     ${FULLCHAIN_INT};
     ssl_certificate_key ${PRIVKEY_INT};
-
     http2_max_concurrent_streams 128;
 
-    # Корень: сайт-плеер
     location / {
         root ${HTML_ROOT};
         index index.html;
         charset utf-8;
     }
 
-    # Health-check
     location = /health { return 204; }
 
-    # HLS-файлы -> отдаём с диска (правильные MIME, CORS, кэш)
-    location ~* ^${XHTTP_PATH%/}/(.*\\.(m3u8|ts))$ {
+    # HLS-файлы с диска
+    location ~* ^${XHTTP_PATH%/}/(.*\.(m3u8|ts))$ {
         root ${WEB_ROOT};
-        types {
-            application/vnd.apple.mpegurl m3u8;
-            video/mp2t ts;
-        }
-        # Плейлисты не кэшируем
-        if (\$uri ~* "\\.m3u8$") {
-            add_header Cache-Control "no-cache, no-store, must-revalidate";
-        }
-        # Сегменты .ts кэшируем надолго
-        if (\$uri ~* "\\.ts$") {
-            add_header Cache-Control "public, max-age=31536000, immutable";
-        }
+        types { application/vnd.apple.mpegurl m3u8; video/mp2t ts; }
+        if (\$uri ~* "\.m3u8$") { add_header Cache-Control "no-cache, no-store, must-revalidate"; }
+        if (\$uri ~* "\.ts$")   { add_header Cache-Control "public, max-age=31536000, immutable"; }
         add_header Access-Control-Allow-Origin * always;
         add_header Access-Control-Allow-Headers "Range, Origin, Content-Type, Accept" always;
         add_header Access-Control-Expose-Headers "Content-Length, Content-Range" always;
         default_type application/octet-stream;
     }
 
-    # Всё прочее под XHTTP-путём -> в Xray через gRPC (UNIX socket)
+    # Всё остальное под XHTTP-путём — в Xray по gRPC/UNIX
     location ${XHTTP_PATH} {
         client_max_body_size 0;
         grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-
         client_body_timeout 5m;
         grpc_read_timeout   315s;
         grpc_send_timeout   5m;
-
-        grpc_pass unix:/dev/shm/xrxh.socket;
+        grpc_pass unix:${SOCK_PATH};
     }
 }
 NGINX
 
 ln -sf "${SITE_FILE}" "${SITE_LINK}"
-# Удалим дефолт, чтобы не мешал
+rm -f "/etc/nginx/sites-enabled/_acme_${INTERNAL_DOMAIN}.conf" "${TEMP80}" 2>/dev/null || true
 rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
-# Чистим временный ACME-сайт (нам он больше не нужен)
-rm -f "/etc/nginx/sites-enabled/_acme_${SITE_NAME}.conf" "${TEMP80}" 2>/dev/null || true
-
-# Проверка и перезапуск
-step "Проверяем конфиги nginx..."
+step "Проверяю конфиги nginx и перезагружаю ..."
 nginx -t
-if [[ "${RELOAD_NGINX^^}" != "N" ]]; then
-  systemctl reload nginx
-  ok "nginx перезагружен"
+systemctl reload nginx || systemctl restart nginx
+ok "nginx перезагружен"
+
+# ---------- Диагностика ----------
+step "Самопроверка"
+set +e
+CODE_HEALTH=$(curl -sS -o /dev/null -w "%{http_code}" --http2 -k "https://${INTERNAL_DOMAIN}/health")
+CODE_TUNNEL=$(curl -sS -o /dev/null -w "%{http_code}" --http2 -k "https://${INTERNAL_DOMAIN}${XHTTP_PATH}test")
+MIME_M3U8=$(curl -sS -I --http2 -k "https://${INTERNAL_DOMAIN}${XHTTP_PATH}master.m3u8" | awk -F': ' 'tolower($1)=="content-type"{gsub("\r","");print $2}')
+set -e
+
+echo "  /health → ${CODE_HEALTH}"
+if [[ "${CODE_HEALTH}" == "204" ]]; then
+  echo "   ${GRN}OK${RST}: HTTPS сайт отвечает."
 else
-  warn "nginx НЕ перезагружали (по твоему выбору)."
+  echo "   ${RED}FAIL${RST}: /health не 204 — проверь SSL/сервернеймы/DNS/файрвол."
 fi
 
-# ========== 7. Самопроверка ==========
-step "Самопроверка (через внутренний домен)..."
-set +e
-HC=$(curl -sS -o /dev/null -w "%{http_code}" --http2 -k "https://${INTERNAL_DOMAIN}/health")
-CT=$(curl -sS -I --http2 -k "https://${INTERNAL_DOMAIN}${XHTTP_PATH}master.m3u8" | awk -F': ' 'tolower($1)=="content-type"{print $2}' | tr -d '\r')
-set -e
-echo "  /health @ ${INTERNAL_DOMAIN}  => HTTP ${HC}"
-echo "  MIME(master.m3u8) ожидается application/vnd.apple.mpegurl => ${CT:-<нет файла>}"
+echo "  ${XHTTP_PATH}test → ${CODE_TUNNEL}"
+case "${CODE_TUNNEL}" in
+  400) echo "   ${GRN}OK${RST}: XHTTP жив (400 — ожидаемо без полезной нагрузки клиента VLESS)." ;;
+  502) echo "   ${RED}FAIL${RST}: 502 — nginx не достучался до Xray. Скорее всего нет сокета ${SOCK_PATH} или неверен путь XHTTP."
+       echo "             Проверь: ls -lh ${SOCK_PATH} и inbound Remnawave (listen=${SOCK_PATH}, path=${XHTTP_PATH})." ;;
+  499|504) echo "   ${YLW}WARN${RST}: таймаут/обрыв. Проверь нагрузку и доступность Xray." ;;
+  *) echo "   ${YLW}WARN${RST}: код ${CODE_TUNNEL}. Для живого XHTTP обычно видим 400; иное — проверь inbound/сокет/путь." ;;
+esac
+
+if [[ -n "${MIME_M3U8}" ]]; then
+  echo "  master.m3u8 Content-Type → ${MIME_M3U8}"
+  [[ "${MIME_M3U8}" == "application/vnd.apple.mpegurl" ]] \
+    && echo "   ${GRN}OK${RST}: MIME корректен." \
+    || echo "   ${YLW}WARN${RST}: неожиданный MIME — проверь regex location для m3u8."
+else
+  echo "  master.m3u8: ${DIM}файл не найден — это нормально, если HLS ещё не залит.${RST}"
+fi
 
 echo
-echo "${BLD}${GRN}=========================== ГОТОВО ===========================${RST}"
-echo "CDN-домен (внешний):      ${CDN_DOMAIN}"
-echo "Внутренний домен (TLS):   ${INTERNAL_DOMAIN}"
-echo "XHTTP путь:               ${XHTTP_PATH}"
+echo "${BLD}${GRN}===================== ГОТОВО =====================${RST}"
+echo " CDN-домен (публичный):  ${CDN_DOMAIN}"
+echo " Origin/TLS-домен:       ${INTERNAL_DOMAIN}"
+echo " XHTTP путь:             ${XHTTP_PATH}"
+echo " Xray сокет:             ${SOCK_PATH}"
 echo
-echo "Каталоги:"
-echo " - Сайт:  ${HTML_ROOT}"
-echo " - HLS:   ${HLS_ROOT}"
-echo
-echo "Nginx конфиг: ${SITE_FILE}"
-echo
-echo "Проверка локально (внутренний домен):"
-echo "  https://${INTERNAL_DOMAIN}/"
-echo "  https://${INTERNAL_DOMAIN}/health   (ожидается HTTP 204)"
-echo
-echo "Через CDN (после корректной настройки origin/Host на ${INTERNAL_DOMAIN}):"
-echo "  https://${CDN_DOMAIN}/"
-echo
-echo "Напоминание:"
-echo " - Плейлисты .m3u8 НЕ кэшируются; сегменты .ts кэшируются надолго (immutable)."
-echo " - Всё под ${XHTTP_PATH} НЕ являющееся *.m3u8|*.ts уходит в Xray через unix-сокет /dev/shm/xrxh.socket."
-echo " - Remnawave/Xray конфиги скрипт НЕ меняет."
-echo "${BLD}${GRN}==============================================================${RST}"
+if [[ "${MODE}" == "1" ]]; then
+  echo "Подсказка для CDN:"
+  echo " - В DNS сделай CNAME для ${CDN_DOMAIN} → хост, выданный провайдером CDN."
+  echo " - В панели CDN: origin=${INTERNAL_DOMAIN}, protocol=HTTPS, host header=${INTERNAL_DOMAIN}."
+else
+  echo "Подсказка без CDN:"
+  echo " - В DNS сделай A для ${CDN_DOMAIN} → IP VPS. При желании используй его же как origin."
+fi
+[[ ! -S "${SOCK_PATH}" ]] && echo "${YLW}!${RST} Внимание: сокет ${SOCK_PATH} сейчас отсутствует. Подними inbound в Remnawave/Xray:"
+[[ ! -S "${SOCK_PATH}" ]] && echo "    listen=${SOCK_PATH}, path=${XHTTP_PATH}, network=xhttp, mode=auto, decryption=none."
